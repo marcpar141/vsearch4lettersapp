@@ -1,7 +1,10 @@
-from flask import Flask, render_template, request, escape, session
+from flask import Flask, render_template, request, escape, session, copy_current_request_context
 from vsearch import search4letters
-import mysql.connector
+
+from DBcm import UseDatabase, ConnectionError, CredentialError, SQLError
 from checker import check_loggen_in
+
+from threading import Thread
 
 app = Flask(__name__)
 
@@ -10,25 +13,19 @@ app.config['dbconfig'] = {'host': '127.0.0.1',
                           'password': 'vsearchpasswd',
                           'database': 'vsearchlogDB'}
 
+app.secret_key = 'YouWillNeverGuess'
 
-def log_request(req: 'flask_request', res: str) -> None:
-    conn = mysql.connector.connect(**app.config['dbconfig'])
-    cursor = conn.cursor()
 
-    _SQL = """insert into log
-                (phrase, letters, ip, browser_string, results)
-                values
-                (%s, %s, %s, %s, %s)"""
+@app.route('/login')
+def do_login() -> str:
+    session['logged_in'] = True
+    return 'Teraz jesteś zalogowany'
 
-    cursor.execute(_SQL, (req.form['phrase'],
-                          req.form['letters'],
-                          req.remote_addr,
-                          req.user_agent.browser,
-                          res,))
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+@app.route('/logout')
+def do_logout() -> str:
+    session.pop('logged_in')
+    return 'Teraz jesteś wylogowany'
 
 
 @app.route('/')
@@ -40,11 +37,37 @@ def entry_page() -> 'html':
 
 @app.route('/search4', methods=['POST'])
 def do_search() -> 'html':
+    @copy_current_request_context
+    def log_request(req: 'flask_request', res: str) -> None:
+        try:
+            with UseDatabase(app.config['dbconfig']) as cursor:
+
+                _SQL = """insert into log
+                        (phrase, letters, ip, browser_string, results)
+                        values
+                        (%s, %s, %s, %s, %s)"""
+
+                cursor.execute(_SQL, (req.form['phrase'],
+                                      req.form['letters'],
+                                      req.remote_addr,
+                                      req.user_agent.browser,
+                                      res,))
+        except ConnectionError as err:
+            print('Is your database turn on? Error: ', str(err))
+        except CredentialError as err:
+            print('Wrong login or password. Error: ', str(err))
+        except SQLError as err:
+            print('Is your request correct? Error: ', str(err))
+
     phrase = request.form['phrase']
     letters = request.form['letters']
     title = 'Oto Twoje wyniki:'
     results = str(search4letters(phrase, letters))
-    log_request(request, results)
+    try:
+        t = Thread(target=log_request, args=(request, results))
+        t.start()
+    except Exception as err:
+        print('Logowanie nie powiodło się; wystąpił błąd: ', str(err))
     return render_template('results.html',
                            the_title=title,
                            the_phrase=phrase,
@@ -52,45 +75,32 @@ def do_search() -> 'html':
                            the_results=results, )
 
 
-# @app.route('/login')
-# def do_login() -> 'html':
-#     return render_template('login.html',
-#                            the_title='Zaloguj się!')
-#
-#
-# @app.route('/verification', methods=['POST'])
-# def do_verification() -> 'html':
-#     administrator = {'user': ' Marceli',
-#                      'password': '1234'}
-#     verification = {'user': request.form['login'],
-#                     'password': request.form['password']}
-#     if administrator.__eq__(verification):
-#         session['logged_in'] = True
-#         return 'Teraz jesteś zalogowany'
-#     return 'Nie jesteś zalogowany'
-
-
 @app.route('/viewlog')
+@check_loggen_in
 def view_the_log() -> 'html':
-    conn = mysql.connector.connect(**app.config['dbconfig'])
-    cursor = conn.cursor()
+    try:
+        with UseDatabase(app.config['dbconfig']) as cursor:
 
-    _SQL = """select phrase, letters, ip, browser_string, results
-        from log"""
+            _SQL = """select phrase, letters, ip, browser_string, results
+                from log"""
 
-    cursor.execute(_SQL)
-    contents = cursor.fetchall()
+            cursor.execute(_SQL)
+            contents = cursor.fetchall()
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+            titles = ('Fraza', 'litery', 'Adres klienta', 'Agent użytkownika', 'Wyniki')
+            return render_template('viewlog.html',
+                                   the_title='Widok logu',
+                                   the_row_titles=titles,
+                                   the_data=contents)
+    except ConnectionError as err:
+        print('Is your database turn on? Error: ', str(err))
+    except CredentialError as err:
+        print('Wrong login or password. Error: ', str(err))
+    except SQLError as err:
+        print('Is your request correct? Error: ', str(err))
 
-    titles = ('Fraza', 'litery', 'Adres klienta', 'Agent użytkownika', 'Wyniki')
-    return render_template('viewlog.html',
-                           the_title='Widok logu',
-                           the_row_titles=titles,
-                           the_data=contents)
 
+app.secret_key = 'NigdyNieZgadnieszMojegoHasła'
 
 if __name__ == '__main__':
     app.run(debug=True)

@@ -1,4 +1,3 @@
-
 def search4vowels(phrase: str) -> set:
     """Zwraca samogłoski znalezione w słowie podanym jako argument."""
     vowels = set('aeiou')
